@@ -21,5 +21,4 @@ services:
     name: kakamega-db
     env: postgres
     plan: free
-    # This is the corrected line
     version: "14"
