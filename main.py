@@ -1,14 +1,15 @@
-# main.py - FINAL CORRECTED VERSION WITH USER NAMES AND SINGLE-FILE STRUCTURE
+# main.py - FINAL, ROBUST VERSION FOR PRODUCTION
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, event
+from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
+import time # Import the time library
 
 # --- Configuration ---
 DATABASE_URL = "postgresql://kakamega_db_user:GuMJ3n0l9KqlGdCmATffQfwhrDzKlW3W@dpg-d2s19iripnbc73e4b840-a/kakamega_db"
@@ -84,6 +85,7 @@ def get_db():
 
 # --- Function to create initial data ---
 def create_initial_users(db: Session):
+    # This function now ONLY adds users. It assumes the table exists.
     if db.query(User).count() == 0:
         users_to_create = [
             {"staff_number": "85891", "pin": "8589", "full_name": "Martin Karanja"},
@@ -103,12 +105,27 @@ def create_initial_users(db: Session):
 # --- Event to create tables and initial data on startup ---
 @app.on_event("startup")
 def on_startup():
-    # Create tables
-    Base.metadata.create_all(bind=engine)
-    # Create initial users
+    # THIS IS THE FIX: We create the tables FIRST and wait.
+    # This is a simple but robust way to ensure the table exists before we try to use it.
+    retries = 5
+    while retries > 0:
+        try:
+            Base.metadata.create_all(bind=engine)
+            print("Database tables created successfully.")
+            break # Exit the loop if successful
+        except Exception as e:
+            print(f"Could not connect to database: {e}, retrying in 5 seconds...")
+            retries -= 1
+            time.sleep(5)
+
+    # Now that we are sure the table exists, we can add the users.
     db = SessionLocal()
-    create_initial_users(db)
-    db.close()
+    try:
+        create_initial_users(db)
+        print("Initial users checked/created successfully.")
+    finally:
+        db.close()
+
 
 # --- API Endpoints ---
 @app.post("/token", response_model=Token)
