@@ -1,4 +1,4 @@
-# main.py - FINAL, ROBUST VERSION FOR PRODUCTION
+# main.py - FINAL ROBUST VERSION FOR PRODUCTION
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +9,6 @@ from pydantic import BaseModel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
-import time # Import the time library
 
 # --- Configuration ---
 DATABASE_URL = "postgresql://kakamega_db_user:GuMJ3n0l9KqlGdCmATffQfwhrDzKlW3W@dpg-d2s19iripnbc73e4b840-a/kakamega_db"
@@ -56,9 +55,6 @@ class Token(BaseModel):
     token_type: str
     user_data: dict
 
-class TokenData(BaseModel):
-    staff_number: str | None = None
-
 # --- FastAPI App Instance ---
 app = FastAPI()
 
@@ -83,9 +79,16 @@ def get_db():
     finally:
         db.close()
 
-# --- Function to create initial data ---
-def create_initial_users(db: Session):
-    # This function now ONLY adds users. It assumes the table exists.
+# --- THE FIX: We create the tables here, outside of any event ---
+# This code runs only ONCE when the file is first loaded by Python.
+# It is the simplest and most reliable way to ensure tables exist.
+Base.metadata.create_all(bind=engine)
+
+# --- API Endpoints ---
+@app.post("/token", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    # Check if any users exist. If not, create them.
+    # This is a safe way to add initial data.
     if db.query(User).count() == 0:
         users_to_create = [
             {"staff_number": "85891", "pin": "8589", "full_name": "Martin Karanja"},
@@ -102,34 +105,7 @@ def create_initial_users(db: Session):
             db.add(db_user)
         db.commit()
 
-# --- Event to create tables and initial data on startup ---
-@app.on_event("startup")
-def on_startup():
-    # THIS IS THE FIX: We create the tables FIRST and wait.
-    # This is a simple but robust way to ensure the table exists before we try to use it.
-    retries = 5
-    while retries > 0:
-        try:
-            Base.metadata.create_all(bind=engine)
-            print("Database tables created successfully.")
-            break # Exit the loop if successful
-        except Exception as e:
-            print(f"Could not connect to database: {e}, retrying in 5 seconds...")
-            retries -= 1
-            time.sleep(5)
-
-    # Now that we are sure the table exists, we can add the users.
-    db = SessionLocal()
-    try:
-        create_initial_users(db)
-        print("Initial users checked/created successfully.")
-    finally:
-        db.close()
-
-
-# --- API Endpoints ---
-@app.post("/token", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    # Now, proceed with login
     user = db.query(User).filter(User.staff_number == form_data.username).first()
     if not user or not verify_pin(form_data.password, user.hashed_pin):
         raise HTTPException(
