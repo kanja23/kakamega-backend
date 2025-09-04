@@ -1,9 +1,9 @@
-# main.py - FINAL VERSION WITH USER NAMES
+# main.py - FINAL CORRECTED VERSION WITH USER NAMES AND SINGLE-FILE STRUCTURE
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String
-from sqlalchemy.ext.declardeclarative_base import declarative_base
+from sqlalchemy import create_engine, Column, Integer, String, event
+from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from jose import JWTError, jwt
@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 # --- Configuration ---
 DATABASE_URL = "postgresql://kakamega_db_user:GuMJ3n0l9KqlGdCmATffQfwhrDzKlW3W@dpg-d2s19iripnbc73e4b840-a/kakamega_db"
-SECRET_KEY = "a_very_secret_key_for_jwt" # In production, use a secure, random key
+SECRET_KEY = "a_very_secret_key_for_jwt"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -20,25 +20,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
-# --- Models ---
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    staff_number = Column(String, unique=True, index=True)
-    full_name = Column(String) # <-- NEW FIELD
-    hashed_pin = Column(String)
-
-Base.metadata.create_all(bind=engine)
-
-# --- Schemas (Pydantic Models) ---
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-    user_data: dict # <-- We will send user data back
-
-class TokenData(BaseModel):
-    staff_number: str | None = None
 
 # --- Security ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -60,30 +41,24 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# --- Dependency ---
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# --- Database Models (SQLAlchemy) ---
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    staff_number = Column(String, unique=True, index=True, nullable=False)
+    full_name = Column(String, nullable=False)
+    hashed_pin = Column(String, nullable=False)
 
-# --- Pre-populate Database with Users ---
-def create_initial_users(db: Session):
-    # Check if users already exist
-    if db.query(User).count() == 0:
-        users_to_create = [
-            {"staff_number": "85891", "pin": "8589", "full_name": "Martin Karanja"},
-            {"staff_number": "16957", "pin": "1695", "full_name": "Godfrey"},
-            {"staff_number": "12345", "pin": "1234", "full_name": "Jane Doe"},
-        ]
-        for user_data in users_to_create:
-            hashed_pin = get_pin_hash(user_data["pin"])
-            db_user = User(staff_number=user_data["staff_number"], hashed_pin=hashed_pin, full_name=user_data["full_name"])
-            db.add(db_user)
-        db.commit()
+# --- Pydantic Models (Schemas) ---
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user_data: dict
 
-# --- FastAPI App ---
+class TokenData(BaseModel):
+    staff_number: str | None = None
+
+# --- FastAPI App Instance ---
 app = FastAPI()
 
 # --- CORS Middleware ---
@@ -99,12 +74,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Dependency to get DB session ---
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# --- Function to create initial data ---
+def create_initial_users(db: Session):
+    if db.query(User).count() == 0:
+        users_to_create = [
+            {"staff_number": "85891", "pin": "8589", "full_name": "Martin Karanja"},
+            {"staff_number": "16957", "pin": "1695", "full_name": "Godfrey"},
+            {"staff_number": "12345", "pin": "1234", "full_name": "Jane Doe"},
+        ]
+        for user_data in users_to_create:
+            hashed_pin = get_pin_hash(user_data["pin"])
+            db_user = User(
+                staff_number=user_data["staff_number"],
+                hashed_pin=hashed_pin,
+                full_name=user_data["full_name"]
+            )
+            db.add(db_user)
+        db.commit()
+
+# --- Event to create tables and initial data on startup ---
 @app.on_event("startup")
 def on_startup():
+    # Create tables
+    Base.metadata.create_all(bind=engine)
+    # Create initial users
     db = SessionLocal()
     create_initial_users(db)
     db.close()
 
+# --- API Endpoints ---
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.staff_number == form_data.username).first()
