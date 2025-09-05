@@ -11,11 +11,14 @@ from pydantic import BaseModel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 # --- Database Configuration ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise ValueError("No DATABASE_URL environment variable set")
+    # Fallback for local development
+    DATABASE_URL = "postgresql://username:password@localhost/dbname"
+    print(f"Using fallback DATABASE_URL: {DATABASE_URL}")
 
 # Connect to the database with retry logic
 engine = None
@@ -36,7 +39,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Security Configuration ---
-SECRET_KEY = "a_very_secret_key_for_jwt" # In production, use environment variables
+SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_for_jwt")  # Use environment variable in production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -51,13 +54,27 @@ class User(Base):
     hashed_pin = Column(String)
 
 # --- Pydantic Models (Data Schemas) ---
+class UserBase(BaseModel):
+    staff_number: str
+    full_name: str
+
+class UserCreate(UserBase):
+    pin: str
+
+class UserInDB(UserBase):
+    id: int
+    hashed_pin: str
+
+    class Config:
+        orm_mode = True
+
 class Token(BaseModel):
     access_token: str
     token_type: str
     user_data: dict
 
 class TokenData(BaseModel):
-    staff_number: str | None = None
+    staff_number: Optional[str] = None
 
 # --- FastAPI App Instance ---
 app = FastAPI()
@@ -66,6 +83,7 @@ app = FastAPI()
 origins = [
     "https://kakamega-field-ops.netlify.app",
     "http://localhost:3000",
+    "http://localhost:8000",  # Added for local testing
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -90,7 +108,7 @@ def verify_pin(plain_pin, hashed_pin):
 def get_pin_hash(pin):
     return pwd_context.hash(pin)
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
@@ -119,27 +137,41 @@ def create_initial_users(db: Session):
             db.add(db_user)
         db.commit()
         print("Initial users created successfully.")
+    else:
+        print("Users table already has data. Skipping initial user creation.")
+
+def get_user(db: Session, staff_number: str):
+    return db.query(User).filter(User.staff_number == staff_number).first()
 
 # --- Create Database Tables on Startup ---
-# This is a robust way to ensure tables exist before the app starts serving requests.
-try:
-    print("Creating database tables...")
-    Base.metadata.create_all(bind=engine)
-    print("Database tables created or already exist.")
-except Exception as e:
-    print(f"Error creating database tables: {e}")
-    # We don't raise an error here to allow the app to start,
-    # the user creation logic will handle the rest.
+@app.on_event("startup")
+def startup_event():
+    try:
+        print("Creating database tables...")
+        Base.metadata.create_all(bind=engine)
+        print("Database tables created or already exist.")
+        
+        # Create initial users after tables are created
+        db = SessionLocal()
+        try:
+            create_initial_users(db)
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"Error during startup: {e}")
 
 # --- API Endpoints ---
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    # THIS IS THE NEW ROBUST LOGIC
-    # Check and create users if the table is empty, every time someone tries to log in.
-    create_initial_users(db)
-
-    user = db.query(User).filter(User.staff_number == form_data.username).first()
-    if not user or not verify_pin(form_data.password, user.hashed_pin):
+    user = get_user(db, form_data.username)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect staff number or PIN",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if not verify_pin(form_data.password, user.hashed_pin):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect staff number or PIN",
@@ -161,3 +193,13 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 @app.get("/")
 def read_root():
     return {"message": "Kakamega Field Ops API is running."}
+
+@app.get("/users/")
+def read_users(db: Session = Depends(get_db)):
+    users = db.query(User).all()
+    return users
+
+# Add a health check endpoint
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "timestamp": datetime.now()}
