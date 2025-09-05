@@ -12,17 +12,23 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # --- Database Configuration ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("No DATABASE_URL environment variable set")
 
+# Ensure the DATABASE_URL uses the correct format for SQLAlchemy
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 # Connect to the database with retry logic
 engine = None
 for i in range(5):
     try:
-        engine = create_engine(DATABASE_URL)
+        engine = create_engine(DATABASE_URL, pool_pre_ping=True)
         with engine.connect() as connection:
             print("Database connection successful.")
         break
@@ -37,7 +43,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Security Configuration ---
-SECRET_KEY = "a_very_secret_key_for_jwt" # In production, use environment variables
+SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_for_jwt")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -58,7 +64,7 @@ class Token(BaseModel):
     user_data: dict
 
 class TokenData(BaseModel):
-    staff_number: str | None = None
+    staff_number: Optional[str] = None
 
 # --- FastAPI App Instance ---
 app = FastAPI()
@@ -67,6 +73,7 @@ app = FastAPI()
 origins = [
     "https://kakamega-field-ops.netlify.app",
     "http://localhost:3000",
+    "https://kakamega-field-ops.netlify.app",
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -91,7 +98,7 @@ def verify_pin(plain_pin, hashed_pin):
 def get_pin_hash(pin):
     return pwd_context.hash(pin)
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
@@ -124,8 +131,12 @@ def create_initial_users(db: Session):
         else:
             print(f"User already exists: {user_data['staff_number']} - {user_data['full_name']}")
     
-    db.commit()
-    print("Initial users check completed.")
+    try:
+        db.commit()
+        print("Initial users check completed.")
+    except Exception as e:
+        db.rollback()
+        print(f"Error creating users: {e}")
 
 # --- Create Database Tables on Startup ---
 @app.on_event("startup")
@@ -187,3 +198,8 @@ def read_root():
 def debug_users(db: Session = Depends(get_db)):
     users = db.query(User).all()
     return [{"staff_number": u.staff_number, "full_name": u.full_name} for u in users]
+
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "timestamp": datetime.now()}
