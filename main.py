@@ -4,7 +4,7 @@ import time
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, text
+from sqlalchemy import create_engine, Column, Integer, String, text, inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
@@ -12,8 +12,6 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 # --- Database Configuration ---
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -108,8 +106,29 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+def check_and_recreate_tables():
+    """Check if tables exist with correct schema, recreate if needed"""
+    inspector = inspect(engine)
+    
+    # Check if users table exists
+    if 'users' not in inspector.get_table_names():
+        print("Users table doesn't exist. Creating all tables...")
+        Base.metadata.create_all(bind=engine)
+        return
+    
+    # Check if users table has the correct columns
+    columns = [col['name'] for col in inspector.get_columns('users')]
+    expected_columns = ['id', 'staff_number', 'full_name', 'hashed_pin']
+    
+    if not all(col in columns for col in expected_columns):
+        print("Users table schema is incorrect. Dropping and recreating tables...")
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+    else:
+        print("Database tables already exist with correct schema.")
+
 def create_initial_users(db: Session):
-    """Create initial users if they don't exist, regardless of table empty status"""
+    """Create initial users if they don't exist"""
     initial_users = [
         {"staff_number": "85891", "full_name": "Martin Karanja", "pin": "8589"},
         {"staff_number": "16957", "full_name": "Godfrey", "pin": "1695"},
@@ -142,8 +161,8 @@ def create_initial_users(db: Session):
 @app.on_event("startup")
 def on_startup():
     try:
-        Base.metadata.create_all(bind=engine)
-        print("Database tables created or already exist.")
+        # Check and recreate tables if needed
+        check_and_recreate_tables()
         
         # Create initial users after tables are created
         db = SessionLocal()
@@ -157,9 +176,6 @@ def on_startup():
 # --- API Endpoints ---
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    # Ensure users exist before attempting login
-    create_initial_users(db)
-    
     user = db.query(User).filter(User.staff_number == form_data.username).first()
     if not user:
         print(f"Login failed: User {form_data.username} not found")
