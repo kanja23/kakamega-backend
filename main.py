@@ -16,9 +16,7 @@ from typing import Optional
 # --- Database Configuration ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    # Fallback for local development
-    DATABASE_URL = "postgresql://username:password@localhost/dbname"
-    print(f"Using fallback DATABASE_URL: {DATABASE_URL}")
+    raise ValueError("No DATABASE_URL environment variable set")
 
 # Connect to the database with retry logic
 engine = None
@@ -39,7 +37,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Security Configuration ---
-SECRET_KEY = os.getenv("SECRET_KEY", "a_very_secret_key_for_jwt")  # Use environment variable in production
+SECRET_KEY = "a_very_secret_key_for_jwt" # In production, use environment variables
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -54,27 +52,13 @@ class User(Base):
     hashed_pin = Column(String)
 
 # --- Pydantic Models (Data Schemas) ---
-class UserBase(BaseModel):
-    staff_number: str
-    full_name: str
-
-class UserCreate(UserBase):
-    pin: str
-
-class UserInDB(UserBase):
-    id: int
-    hashed_pin: str
-
-    class Config:
-        orm_mode = True
-
 class Token(BaseModel):
     access_token: str
     token_type: str
     user_data: dict
 
 class TokenData(BaseModel):
-    staff_number: Optional[str] = None
+    staff_number: str | None = None
 
 # --- FastAPI App Instance ---
 app = FastAPI()
@@ -83,7 +67,6 @@ app = FastAPI()
 origins = [
     "https://kakamega-field-ops.netlify.app",
     "http://localhost:3000",
-    "http://localhost:8000",  # Added for local testing
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -108,7 +91,7 @@ def verify_pin(plain_pin, hashed_pin):
 def get_pin_hash(pin):
     return pwd_context.hash(pin)
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
@@ -119,15 +102,18 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 def create_initial_users(db: Session):
-    # This function creates users ONLY if the table is empty.
-    if db.query(User).count() == 0:
-        print("Users table is empty. Creating initial users...")
-        initial_users = [
-            {"staff_number": "85891", "full_name": "Martin Karanja", "pin": "8589"},
-            {"staff_number": "16957", "full_name": "Godfrey", "pin": "1695"},
-            {"staff_number": "12345", "full_name": "Admin User", "pin": "1234"},
-        ]
-        for user_data in initial_users:
+    """Create initial users if they don't exist, regardless of table empty status"""
+    initial_users = [
+        {"staff_number": "85891", "full_name": "Martin Karanja", "pin": "8589"},
+        {"staff_number": "16957", "full_name": "Godfrey", "pin": "1695"},
+        {"staff_number": "12345", "full_name": "Admin User", "pin": "1234"},
+    ]
+    
+    for user_data in initial_users:
+        # Check if user already exists
+        existing_user = db.query(User).filter(User.staff_number == user_data["staff_number"]).first()
+        if not existing_user:
+            print(f"Creating user: {user_data['staff_number']} - {user_data['full_name']}")
             hashed_pin = get_pin_hash(user_data["pin"])
             db_user = User(
                 staff_number=user_data["staff_number"],
@@ -135,19 +121,16 @@ def create_initial_users(db: Session):
                 hashed_pin=hashed_pin
             )
             db.add(db_user)
-        db.commit()
-        print("Initial users created successfully.")
-    else:
-        print("Users table already has data. Skipping initial user creation.")
-
-def get_user(db: Session, staff_number: str):
-    return db.query(User).filter(User.staff_number == staff_number).first()
+        else:
+            print(f"User already exists: {user_data['staff_number']} - {user_data['full_name']}")
+    
+    db.commit()
+    print("Initial users check completed.")
 
 # --- Create Database Tables on Startup ---
 @app.on_event("startup")
-def startup_event():
+def on_startup():
     try:
-        print("Creating database tables...")
         Base.metadata.create_all(bind=engine)
         print("Database tables created or already exist.")
         
@@ -163,8 +146,12 @@ def startup_event():
 # --- API Endpoints ---
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = get_user(db, form_data.username)
+    # Ensure users exist before attempting login
+    create_initial_users(db)
+    
+    user = db.query(User).filter(User.staff_number == form_data.username).first()
     if not user:
+        print(f"Login failed: User {form_data.username} not found")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect staff number or PIN",
@@ -172,6 +159,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         )
     
     if not verify_pin(form_data.password, user.hashed_pin):
+        print(f"Login failed: Invalid PIN for user {form_data.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect staff number or PIN",
@@ -194,12 +182,8 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 def read_root():
     return {"message": "Kakamega Field Ops API is running."}
 
-@app.get("/users/")
-def read_users(db: Session = Depends(get_db)):
+# Add a debug endpoint to check users (remove in production if needed)
+@app.get("/debug/users")
+def debug_users(db: Session = Depends(get_db)):
     users = db.query(User).all()
-    return users
-
-# Add a health check endpoint
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "timestamp": datetime.now()}
+    return [{"staff_number": u.staff_number, "full_name": u.full_name} for u in users]
